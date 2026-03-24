@@ -124,6 +124,11 @@ def wecom_verify(request):
             if exp > current_time + 300:
                 logger.info(f"Using cached valid MS token for user {user_id}, skipping OAuth flow.")
                 
+                # 重新获取 access_token 用于调用 tfa_succ
+                # 有些情况下，原有的 access_token 可能失效，确保拿到最新的
+                if not access_token:
+                     access_token = wecom_client.get_access_token()
+                
                 if tfa_code:
                     auth_succ_resp = wecom_client.tfa_succ(user_id, tfa_code)
                 else:
@@ -135,6 +140,10 @@ def wecom_verify(request):
                 logger.info(f"Direct wecom auth success response: {auth_succ_resp}")
                 
                 if auth_succ_resp.get("errcode") == 0:
+                    # 免登成功，依然要在 session 中记录本次验证状态的快照，保持与正常 OAuth 后回调的行为一致
+                    request.session['temp_wecom_userid'] = user_id
+                    request.session['temp_wecom_tfacode'] = tfa_code
+                    request.session['accesstoken'] = access_token
                     return HttpResponse(get_close_window_html())
                 else:
                     return HttpResponse(f"WeCom Success Notify Failed: {auth_succ_resp.get('errmsg')}")
