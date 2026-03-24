@@ -11,7 +11,68 @@ from urllib.parse import quote
 from .utils import WeComProvider
 
 
+import time
+
 logger = logging.getLogger('wecom')
+
+def get_close_window_html():
+    return """
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+        <title>身份验证成功</title>
+        <script type="text/javascript" src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
+        <style>
+            body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .container { text-align: center; padding: 20px; }
+            .icon { width: 64px; height: 64px; margin-bottom: 20px; }
+            .status { color: #06AD56; font-size: 20px; font-weight: 500; margin-bottom: 8px; }
+            .desc { color: #888; font-size: 14px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <svg class="icon" viewBox="0 0 64 64"><circle cx="32" cy="32" r="32" fill="#06AD56"/><path d="M18 32l10 10 20-20" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="status">验证成功</div>
+            <div class="desc">正在为您同步状态，请稍候...</div>
+        </div>
+
+        <script type="text/javascript">
+            function forceClose() {
+                // 方案1：调用企业微信原生关闭窗口接口
+                if (typeof WeixinJSBridge !== "undefined") {
+                    WeixinJSBridge.call('closeWindow');
+                }
+                // 方案2：JSSDK 标准接口
+                if (window.wx && window.wx.closeWindow) {
+                    wx.closeWindow();
+                }
+                // 方案3：尝试直接关闭
+                window.close();
+            }
+
+            // 核心逻辑：等待 JSSDK 就绪 + 适当延时
+            function initClose() {
+                // 设置 1.5 秒延时，确保企微后台状态同步完成，防止重复触发验证
+                setTimeout(function() {
+                    forceClose();
+                }, 1500);
+            }
+
+            if (typeof WeixinJSBridge === "undefined") {
+                document.addEventListener('WeixinJSBridgeReady', initClose, false);
+            } else {
+                initClose();
+            }
+
+            // 兜底方案：5秒后如果还没关闭，强制再次尝试
+            setTimeout(forceClose, 5000);
+        </script>
+    </body>
+    </html>
+"""
 
 def wecom_verify(request):
     """
@@ -48,6 +109,35 @@ def wecom_verify(request):
     if not user_id:
         logger.error(f"Failed to get WeCom UserID for code {code}")
         return HttpResponse("WeCom Auth Failed", status=403)
+
+    # 检查缓存中是否已有该用户的有效微软 Token
+    # 如果有，且没有过期，可以直接跳过微软 OAuth，调用 tfa_succ，然后返回关闭窗口 HTML
+    # 注意：使用 cache 或者 session 里之前保存的信息
+    cached_ms_token = request.session.get(f'ms_token_{user_id}')
+    
+    if cached_ms_token:
+        claims = get_user_info_from_token(cached_ms_token)
+        if claims:
+            # 校验 jwt 里的 exp，留 5 分钟的缓冲时间
+            exp = claims.get('exp', 0)
+            current_time = time.time()
+            if exp > current_time + 300:
+                logger.info(f"Using cached valid MS token for user {user_id}, skipping OAuth flow.")
+                
+                if tfa_code:
+                    auth_succ_resp = wecom_client.tfa_succ(user_id, tfa_code)
+                else:
+                    auth_succ_resp = requests.get(
+                        WECOM_CONF["AUTH_SUCC_URL"],
+                        params={"access_token": access_token, "userid": user_id}
+                    ).json()
+                
+                logger.info(f"Direct wecom auth success response: {auth_succ_resp}")
+                
+                if auth_succ_resp.get("errcode") == 0:
+                    return HttpResponse(get_close_window_html())
+                else:
+                    return HttpResponse(f"WeCom Success Notify Failed: {auth_succ_resp.get('errmsg')}")
 
     # B. 存入 Session 并跳转微软
     request.session['temp_wecom_userid'] = user_id
@@ -127,8 +217,8 @@ def ms_callback(request):
     #    logger.error(f"OBO Exchange Failed: {res_b}")
     #    return HttpResponse("OBO Exchange Failed", status=500)
 
-    ## --- Step D: 通知企业微信二次验证成功 ---
-    ## 需要先拿新的或者重用之前的 WeCom Access Token
+    # --- Step E: 通知企业微信二次验证成功 ---
+    # 需要先拿新的或者重用之前的 WeCom Access Token
     if not access_token:
         wecom_token_resp = requests.get(
             "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
@@ -150,67 +240,11 @@ def ms_callback(request):
     logger.info(f"wecom auth success response {auth_succ_resp}")
     if auth_succ_resp.get("errcode") == 0:
         logger.info(f"WeCom authsucc called for {wecom_userid}")
-        # --- Step E: 携带 Token B 跳转最终应用 ---
-        #return redirect(MS_CONF["FINAL_APP_URL"].format(access_token_b))
-
-        html = """
-<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
-        <title>身份验证成功</title>
-        <script type="text/javascript" src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
-        <style>
-            body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #fff; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            .container { text-align: center; padding: 20px; }
-            .icon { width: 64px; height: 64px; margin-bottom: 20px; }
-            .status { color: #06AD56; font-size: 20px; font-weight: 500; margin-bottom: 8px; }
-            .desc { color: #888; font-size: 14px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <svg class="icon" viewBox="0 0 64 64"><circle cx="32" cy="32" r="32" fill="#06AD56"/><path d="M18 32l10 10 20-20" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <div class="status">验证成功</div>
-            <div class="desc">正在为您同步状态，请稍候...</div>
-        </div>
-
-        <script type="text/javascript">
-            function forceClose() {
-                // 方案1：调用企业微信原生关闭窗口接口
-                if (typeof WeixinJSBridge !== "undefined") {
-                    WeixinJSBridge.call('closeWindow');
-                }
-                // 方案2：JSSDK 标准接口
-                if (window.wx && window.wx.closeWindow) {
-                    wx.closeWindow();
-                }
-                // 方案3：尝试直接关闭
-                window.close();
-            }
-
-            // 核心逻辑：等待 JSSDK 就绪 + 适当延时
-            function initClose() {
-                // 设置 1.5 秒延时，确保企微后台状态同步完成，防止重复触发验证
-                setTimeout(function() {
-                    forceClose();
-                }, 1500);
-            }
-
-            if (typeof WeixinJSBridge === "undefined") {
-                document.addEventListener('WeixinJSBridgeReady', initClose, false);
-            } else {
-                initClose();
-            }
-
-            // 兜底方案：5秒后如果还没关闭，强制再次尝试
-            setTimeout(forceClose, 5000);
-        </script>
-    </body>
-    </html>
-"""
-        return HttpResponse(html)
+        
+        # 将验证成功的 token 缓存到 session 中，以便下次免登验证
+        request.session[f'ms_token_{wecom_userid}'] = access_token_a
+        
+        return HttpResponse(get_close_window_html())
     else:
         return HttpResponse(f"WeCom Success Notify Failed: {auth_succ_resp.get('errmsg')}")
 
