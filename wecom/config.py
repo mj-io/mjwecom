@@ -6,6 +6,7 @@ load_dotenv()
 WECOM_CONF = {
     "CORP_ID": os.getenv("WECOM_CORP_ID"),
     "SECRET": os.getenv("WECOM_SECRET"),
+    "AGENT_ID": os.getenv("WECOM_AGENT_ID", ""),
     "AUTH_SUCC_URL": "https://qyapi.weixin.qq.com/cgi-bin/user/authsucc",
     "CLOSE_HTML": """
         <!DOCTYPE html>

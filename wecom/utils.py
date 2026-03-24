@@ -46,6 +46,23 @@ class WeComProvider:
             logger.error(f"请求UserInfo接口异常: {e}")
             return None
 
+    def notify_authed(self, session_info):
+        """
+        通知企业微信二次验证成功
+        Docs: https://developer.work.weixin.qq.com/document/path/93438
+        """
+        token = self.get_access_token()
+        if not token:
+            return {'errcode': -1, 'errmsg': 'Failed to get access_token'}
+
+        params = {'access_token': token, 'session_info': session_info}
+        try:
+            resp = requests.get(f"{self.base_url}/user/authed", params=params).json()
+            return resp
+        except Exception as e:
+            logger.error(f"请求 authed 接口异常: {e}")
+            return {'errcode': -2, 'errmsg': str(e)}
+
     # 尝试通过更新成员自定义字段来刷新状态
     def refresh_user_status(self, user_id):
         access_token=self.get_access_token()
