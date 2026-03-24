@@ -49,3 +49,5 @@ MS_CONF = {
     "DOWNSTREAM_SCOPE": os.getenv("MS_DOWNSTREAM_SCOPE"),
     "FINAL_APP_URL": "https://htltio.cn/login"
 }
+
+CRM_SECRET_KEY = os.getenv("CRM_SECRET_KEY", "eWpUZzZUb1VkQWVzNk5INXJlUlBFWXNidEVWNldpRGs")

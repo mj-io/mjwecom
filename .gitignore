@@ -1,2 +1,3 @@
 wecom_debug.log
 .env
+*.pyc

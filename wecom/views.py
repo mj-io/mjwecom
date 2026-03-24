@@ -290,3 +290,94 @@ def go_app(request):
     app = request.GET.get('app')
     if app == 'veeva':
         return HttpResponseRedirect("https://wchat-auth-login.crmdev.veevasfa.com/#/welcome")
+
+def app_login(request):
+    app = request.GET.get('app')
+    redirect_url = request.GET.get('redirect_url')
+    
+    if app != 'crm':
+        return HttpResponse("Invalid app", status=400)
+        
+    wecom_userid = request.session.get('temp_wecom_userid')
+    if not wecom_userid:
+        return HttpResponse("User not authenticated", status=401)
+        
+    ms_token = request.session.get(f'ms_token_{wecom_userid}')
+    if not ms_token:
+        return HttpResponse("MS token not found", status=401)
+        
+    # OBO exchange logic to get access_token_b
+    token_url = MS_CONF["TOKEN_URL"].format(MS_CONF["TENANT_ID"])
+    obo_payload = {
+        "client_id": MS_CONF["CLIENT_ID"],
+        "client_secret": MS_CONF["CLIENT_SECRET"],
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": ms_token,
+        "requested_token_use": "on_behalf_of",
+        "scope": MS_CONF["DOWNSTREAM_SCOPE"]
+    }
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    res_b = requests.post(token_url, data=obo_payload, headers=headers).json()
+    access_token_b = res_b.get("access_token")
+
+    if not access_token_b:
+        logger.error(f"OBO Exchange Failed: {res_b}")
+        return HttpResponse("OBO Exchange Failed", status=500)
+        
+    # Call Veeva CRM Public API
+    from .config import CRM_SECRET_KEY
+    
+    # a. Get token
+    crm_token_url = "https://auth-login.crmdev.veevasfa.com/public-api/v1/tokens/"
+    crm_headers = {
+        "AUTHORIZATION": f"secret_key {CRM_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    crm_token_res = requests.post(crm_token_url, headers=crm_headers).json()
+    
+    crm_token = crm_token_res.get("data", {}).get("token")
+    if not crm_token:
+        logger.error(f"CRM Token Failed: {crm_token_res}")
+        return HttpResponse("CRM Token Failed", status=500)
+        
+    # b. Call obo_bridge
+    obo_bridge_url = "https://auth-login.crmdev.veevasfa.com/public-api/v1/functions/obo_bridge/"
+    obo_bridge_headers = {
+        "AUTHORIZATION": f"token {crm_token}",
+        "Content-Type": "application/json"
+    }
+    obo_bridge_payload = {
+        "obo_token": access_token_b,
+        "redirect_url": redirect_url,
+        "login_protocol": "sso:oauth2:jjobo"
+    }
+    crm_token_res = requests.post(crm_token_url, headers=crm_headers).json()
+    
+    crm_token = crm_token_res.get("data", {}).get("token")
+    if not crm_token:
+        logger.error(f"CRM Token Failed: {crm_token_res}")
+        return HttpResponse("CRM Token Failed", status=500)
+        
+    # b. Call obo_bridge
+    obo_bridge_url = "https://auth-login.crmdev.veevasfa.com/public-api/v1/functions/obo_bridge/"
+    obo_bridge_headers = {
+        "AUTHORIZATION": f"token {crm_token}"
+    }
+    obo_bridge_payload = {
+        "obo_token": access_token_b,
+        "redirect_url": redirect_url,
+        "login_protocol": "sso:oauth2:jjobo"
+    }
+    obo_bridge_res = requests.post(obo_bridge_url, headers=obo_bridge_headers, json=obo_bridge_payload).json()
+    
+    # c. The response will contain {"data": {"redirect_to": "..."}}
+    redirect_to = obo_bridge_res.get("data", {}).get("redirect_to")
+    
+    if not redirect_to:
+        logger.error(f"OBO Bridge Failed: {obo_bridge_res}")
+        return HttpResponse("Failed to get redirect_to URL", status=500)
+        
+    # d. Redirect the user to that redirect_to URL
+    return redirect(redirect_to)
