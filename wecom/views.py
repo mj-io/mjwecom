@@ -36,13 +36,22 @@ def wecom_verify(request):
     wecom_client = WeComProvider(WECOM_CONF["CORP_ID"], WECOM_CONF["SECRET"])
     access_token = wecom_client.get_access_token()
     
-    user_id = wecom_client.get_user_info(code)
+    tfa_info = wecom_client.get_tfa_info(code)
+    
+    if tfa_info and tfa_info.get('userid'):
+        user_id = tfa_info.get('userid')
+        tfa_code = tfa_info.get('tfa_code')
+    else:
+        user_id = wecom_client.get_user_info(code)
+        tfa_code = None
+
     if not user_id:
-        logger.error(f"Failed to get WeCom UserID: {user_resp}")
+        logger.error(f"Failed to get WeCom UserID for code {code}")
         return HttpResponse("WeCom Auth Failed", status=403)
 
     # B. 存入 Session 并跳转微软
     request.session['temp_wecom_userid'] = user_id
+    request.session['temp_wecom_tfacode'] = tfa_code
     request.session['accesstoken'] = access_token
     logger.info(f"WeCom User identified: {user_id}, redirecting to Entra ID")
 
@@ -62,6 +71,7 @@ def ms_callback(request):
     """
     ms_code = request.GET.get('code')
     wecom_userid = request.session.get('temp_wecom_userid')
+    tfa_code = request.session.get('temp_wecom_tfacode')
     access_token = request.session.get('accesstoken')
     logger.info(f'mscode={ms_code}, wecom_userid={wecom_userid}')
 
@@ -127,10 +137,16 @@ def ms_callback(request):
         access_token = wecom_token_resp.get("access_token")
      
     logger.info(f"wecom access_token is {access_token}")
-    auth_succ_resp = requests.get(
-        WECOM_CONF["AUTH_SUCC_URL"],
-        params={"access_token": access_token, "userid": wecom_userid}
-    ).json()
+    wecom_client = WeComProvider(WECOM_CONF["CORP_ID"], WECOM_CONF["SECRET"])
+
+    if tfa_code:
+        auth_succ_resp = wecom_client.tfa_succ(wecom_userid, tfa_code)
+    else:
+        auth_succ_resp = requests.get(
+            WECOM_CONF["AUTH_SUCC_URL"],
+            params={"access_token": access_token, "userid": wecom_userid}
+        ).json()
+        
     logger.info(f"wecom auth success response {auth_succ_resp}")
     if auth_succ_resp.get("errcode") == 0:
         logger.info(f"WeCom authsucc called for {wecom_userid}")
